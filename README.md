@@ -1,6 +1,6 @@
 # APLit
 
-APLit is a Streamlit UI for browsing AlphaPulldown runs, visualising AF2 **and AF3** outputs, and (optionally) overlaying AlphaJudge interface scores.
+APLit is a Streamlit UI for browsing AlphaPulldown runs, visualising AF2 **and AF3** outputs, and (optionally) overlaying AlphaJudge interface scores. The original code was from the Kosinski Lab at EMBL. 
 
 ## Highlights
 
@@ -16,7 +16,7 @@ APLit is a Streamlit UI for browsing AlphaPulldown runs, visualising AF2 **and A
 Requirements: Python 3.8+
 
 ```bash
-pip install git+ssh://git@github.com/KosinskiLab/aplit.git
+pip install git+ssh://git@github.com/AshwinKarthick/aplit.git
 ```
 
 ## Running the app
