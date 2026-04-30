@@ -3,8 +3,10 @@ Utility functions and data classes for AlphaPulldown analysis
 """
 
 import csv
+import gzip
 import json
 import math
+import pickle
 import re
 import uuid
 
@@ -19,6 +21,124 @@ import streamlit as st
 import matplotlib.pyplot as plt
 
 
+
+
+def _to_float(value: Any, default: Optional[float] = None) -> Optional[float]:
+    try:
+        if value is None:
+            return default
+        if isinstance(value, np.generic):
+            value = value.item()
+        if isinstance(value, (list, tuple, np.ndarray)):
+            arr = np.asarray(value, dtype=float).reshape(-1)
+            arr = arr[np.isfinite(arr)]
+            if arr.size == 0:
+                return default
+            value = arr[0] if arr.size == 1 else np.nanmean(arr)
+        if isinstance(value, str):
+            value = value.strip()
+            if not value or value.lower() in {"na", "n/a", "nan", "none", "null"}:
+                return default
+        out = float(value)
+        if math.isnan(out) or math.isinf(out):
+            return default
+        return out
+    except Exception:
+        return default
+
+
+def _score_from_ranking(ranking_data: Dict[str, Any], key: str, model_name: str, default=None):
+    values = ranking_data.get(key)
+    if isinstance(values, dict) and model_name in values:
+        return _to_float(values.get(model_name), default)
+    return default
+
+
+
+def _load_pickle_scores(job_dir: Path, model_name: str) -> Dict[str, Optional[float]]:
+    """Load true AF2 confidence scores from result_<model>.pkl(.gz) when present."""
+    scores: Dict[str, Optional[float]] = {}
+    for path in (job_dir / f"result_{model_name}.pkl", job_dir / f"result_{model_name}.pkl.gz"):
+        if not path.exists() or path.stat().st_size == 0:
+            continue
+        try:
+            opener = gzip.open if path.suffix == ".gz" else open
+            with opener(path, "rb") as handle:
+                result_data = pickle.load(handle)
+            if isinstance(result_data, dict):
+                for key in ("ptm", "iptm", "ranking_confidence", "iptm+ptm"):
+                    if key in result_data:
+                        scores[key] = _to_float(result_data.get(key), None)
+            break
+        except Exception:
+            continue
+    return scores
+
+def _read_json(path: Path) -> Optional[Any]:
+    try:
+        with path.open("r") as handle:
+            return json.load(handle)
+    except Exception:
+        return None
+
+
+def patch_pae_json_for_alphajudge(job_dir: Path, model_name: str) -> bool:
+    """Backfill score keys into compact AF2 PAE JSON files for AlphaJudge.
+
+    Priority: true ptm/iptm from ranking_debug.json, then true ptm/iptm from
+    result_<model>.pkl(.gz), then ranking_confidence / iptm+ptm from
+    ranking_debug.json. The final fallback is marked as compatibility-only.
+    """
+    ranking_data = _read_json(job_dir / "ranking_debug.json") or {}
+    pickle_scores = _load_pickle_scores(job_dir, model_name)
+
+    iptm_ptm = _score_from_ranking(
+        ranking_data,
+        "iptm+ptm",
+        model_name,
+        pickle_scores.get("ranking_confidence", pickle_scores.get("iptm+ptm")),
+    )
+    ptm = _score_from_ranking(ranking_data, "ptm", model_name, pickle_scores.get("ptm"))
+    iptm = _score_from_ranking(ranking_data, "iptm", model_name, pickle_scores.get("iptm"))
+
+    score_source = "explicit_or_pickle"
+    if ptm is None and iptm_ptm is not None:
+        ptm = iptm_ptm
+        score_source = "iptm+ptm_fallback_for_alphajudge"
+    if iptm is None and iptm_ptm is not None:
+        iptm = iptm_ptm
+        score_source = "iptm+ptm_fallback_for_alphajudge"
+
+    candidates = [job_dir / f"pae_{model_name}.json"]
+    m = re.search(r"model_(\d+)", model_name)
+    if m:
+        n = m.group(1)
+        candidates += [job_dir / f"pae_model_{n}_ptm_pred_0.json", job_dir / f"pae_model_{n}.json"]
+
+    changed_any = False
+    for path in dict.fromkeys(candidates):
+        if not path.exists() or path.stat().st_size == 0:
+            continue
+        payload = _read_json(path)
+        if payload is None:
+            continue
+        data = payload[0] if isinstance(payload, list) and payload else payload
+        if not isinstance(data, dict):
+            continue
+        if "predicted_aligned_error" not in data and "pae" not in data:
+            continue
+        changed = False
+        for key, value in (("ptm", ptm), ("iptm", iptm), ("ranking_confidence", iptm_ptm), ("iptm+ptm", iptm_ptm)):
+            if key not in data and value is not None:
+                data[key] = float(value)
+                changed = True
+        if changed:
+            data.setdefault("alphajudge_score_source", score_source)
+            with path.open("w") as handle:
+                json.dump(payload, handle, separators=(",", ":"))
+            changed_any = True
+    return changed_any
+
 class AlphaPulldownAnalyzer:
     """Handles analysis of AlphaPulldown prediction directories"""
 
@@ -29,15 +149,7 @@ class AlphaPulldownAnalyzer:
 
     @staticmethod
     def _safe_float(value: Any, default: Optional[float] = None) -> Optional[float]:
-        try:
-            if value is None:
-                return default
-            val = float(value)
-            if math.isnan(val):
-                return default
-            return val
-        except (TypeError, ValueError):
-            return default
+        return _to_float(value, default)
 
     @staticmethod
     def _select_best_interface_row(df: pd.DataFrame) -> Optional[pd.Series]:
@@ -95,21 +207,36 @@ class AlphaPulldownAnalyzer:
         models: List[Dict[str, Any]] = []
         for rank_idx, model_name in enumerate(order):
             structure_path = job_dir / f"ranked_{rank_idx}.pdb"
+            if not structure_path.exists():
+                for alt in (job_dir / f"ranked_{rank_idx}.pdb.gz", job_dir / f"ranked_{rank_idx}.cif", job_dir / f"ranked_{rank_idx}.mmcif"):
+                    if alt.exists():
+                        structure_path = alt
+                        break
+            pickle_scores = _load_pickle_scores(job_dir, model_name)
+            iptm_ptm = _score_from_ranking(
+                ranking_data,
+                "iptm+ptm",
+                model_name,
+                pickle_scores.get("ranking_confidence", pickle_scores.get("iptm+ptm", 0.0)),
+            )
+            iptm = _score_from_ranking(ranking_data, "iptm", model_name, pickle_scores.get("iptm", 0.0))
+            ptm = _score_from_ranking(ranking_data, "ptm", model_name, pickle_scores.get("ptm"))
+            suffix = structure_path.suffix.lower()
+            structure_format = "mmcif" if suffix in {".cif", ".mmcif"} else "pdb"
             models.append(
                 {
                     "rank": rank_idx,
                     "model_name": model_name,
-                    "iptm": ranking_data.get("iptm", {}).get(model_name, 0.0),
-                    "iptm_ptm": ranking_data.get("iptm+ptm", {}).get(model_name, 0.0),
-                    "ptm": ranking_data.get("ptm", {}).get(model_name),
+                    "iptm": iptm if iptm is not None else 0.0,
+                    "iptm_ptm": iptm_ptm if iptm_ptm is not None else 0.0,
+                    "ptm": ptm,
                     "structure_file": structure_path,
-                    "structure_format": "pdb",
+                    "structure_format": structure_format,
                     "pdb_file": structure_path,
                     "job_type": "af2",
                 }
             )
         return models
-
     def _load_af3_models(self, job_dir: Path) -> List[Dict[str, Any]]:
         ranking_path = job_dir / "ranking_scores.csv"
         rows: List[Dict[str, Any]] = []
@@ -296,37 +423,24 @@ class AlphaPulldownAnalyzer:
     def obtain_pae_and_iptm(
         self, result_dir: Path, model_name: str
     ) -> Tuple[Optional[np.ndarray], Optional[float]]:
-        """Extract PAE matrix and ipTM score for a specific model"""
+        """Extract PAE matrix and ipTM score for a specific model."""
         try:
-            # Load PAE data
-            pae_file = result_dir / f"pae_{model_name}.json"
-            if not pae_file.exists():
-                model_num = (
-                    model_name.split("_")[1] if "_" in model_name else model_name
-                )
-                pae_file = result_dir / f"pae_model_{model_num}_ptm_pred_0.json"
+            pae_file = get_pae_file_for_model(result_dir, model_name)
+            pae_mtx = load_pae_matrix_cached(str(pae_file)) if pae_file else None
 
-            if pae_file.exists():
-
-                with open(pae_file, "r") as f:
-                    pae_data = json.load(f)
-                pae_mtx = np.array(pae_data[0]["predicted_aligned_error"])
-            else:
-                pae_mtx = None
-
-            # Load ranking data for ipTM
+            ranking_data: Dict[str, Any] = {}
             ranking_file = result_dir / "ranking_debug.json"
-            with open(ranking_file, "r") as f:
-                ranking_data = json.load(f)
+            if ranking_file.exists():
+                with ranking_file.open() as f:
+                    ranking_data = json.load(f)
 
-            iptm_score = ranking_data.get("iptm", {}).get(model_name)
-
+            pickle_scores = _load_pickle_scores(result_dir, model_name)
+            iptm_score = _score_from_ranking(ranking_data, "iptm", model_name, pickle_scores.get("iptm"))
             return pae_mtx, iptm_score
 
         except Exception as e:
             st.warning(f"Could not load PAE/ipTM data from {result_dir}: {e}")
             return None, None
-
     def get_all_models(self, result_dir: Path) -> List[Dict]:
         """Get information about all models in a prediction directory"""
         try:
@@ -406,10 +520,7 @@ class AlphaPulldownAnalyzer:
                         if src not in interface_summary:
                             continue
                         value = interface_summary.get(src)
-                        if pd.isna(value):
-                            interface_metrics[dst] = None
-                        else:
-                            interface_metrics[dst] = float(value)
+                        interface_metrics[dst] = _to_float(value, None)
 
                     iptm_score = interface_metrics.get("iptm", iptm_score)
                     iptm_ptm_score = interface_metrics.get("iptm_ptm", iptm_ptm_score)
@@ -424,8 +535,8 @@ class AlphaPulldownAnalyzer:
                     "path": str(job_dir),
                     "n_models": len(models),
                     "job_type": job_type,
-                    "interface_csv": str(job_dir / "interfaces.csv")
-                    if interface_df is not None
+                    "interface_csv": str(interface_df["_interfaces_csv"].dropna().iloc[0])
+                    if interface_df is not None and "_interfaces_csv" in interface_df.columns and not interface_df["_interfaces_csv"].dropna().empty
                     else None,
                     "interface_summary_model": interface_summary.get("model_used")
                     if interface_summary is not None
@@ -641,37 +752,59 @@ def create_3dmol_view(
 
 
 def get_pae_file_for_model(job_path: Path, model_name: str) -> Optional[Path]:
-    """Find the PAE file for a specific model"""
-    model_num = model_name.split("_")[1] if "_" in model_name else model_name
-    candidates = [
-        job_path / f"pae_{model_name}.json",
-        job_path / f"pae_model_{model_num}_ptm_pred_0.json",
-        job_path / f"pae_model_{model_num}.json",
-    ]
-
-    for candidate in candidates:
-        if candidate.exists():
+    """Find the PAE file for a specific model."""
+    candidates = [job_path / f"pae_{model_name}.json"]
+    match = re.search(r"model_(\d+)", model_name)
+    if match:
+        model_num = match.group(1)
+        candidates.extend([
+            job_path / f"pae_model_{model_num}_ptm_pred_0.json",
+            job_path / f"pae_model_{model_num}.json",
+        ])
+    for candidate in dict.fromkeys(candidates):
+        if candidate.exists() and candidate.stat().st_size > 0:
             return candidate
-
     return None
 
 
-def load_interfaces_csv(job_path: Path) -> Optional[pd.DataFrame]:
-    """Load AlphaJudge interfaces.csv if it exists and is non-empty."""
-    csv_path = job_path / "interfaces.csv"
-    if not csv_path.exists() or csv_path.stat().st_size == 0:
-        return None
+def find_interfaces_csv_files(job_path: Path, max_depth: int = 5) -> List[Path]:
+    """Find AlphaJudge interfaces.csv files directly or nested under a job."""
+    if not job_path.exists():
+        return []
+    out: List[Path] = []
+    for path in job_path.rglob("interfaces.csv"):
+        try:
+            rel_depth = len(path.relative_to(job_path).parts) - 1
+        except ValueError:
+            continue
+        if rel_depth > max_depth:
+            continue
+        parts = set(path.relative_to(job_path).parts)
+        if parts & {"_archive_duplicate_pairs", "__pycache__"}:
+            continue
+        if path.stat().st_size > 0:
+            out.append(path)
+    return sorted(out)
 
-    try:
-        df = pd.read_csv(csv_path)
-        if df.empty:
-            return None
-        return df
-    except EmptyDataError:
+
+def load_interfaces_csv(job_path: Path) -> Optional[pd.DataFrame]:
+    """Load direct or nested AlphaJudge interfaces.csv files for one job."""
+    frames: List[pd.DataFrame] = []
+    for csv_path in find_interfaces_csv_files(job_path):
+        try:
+            df = pd.read_csv(csv_path)
+            if df.empty:
+                continue
+            df = df.copy()
+            df["_interfaces_csv"] = str(csv_path)
+            frames.append(df)
+        except EmptyDataError:
+            continue
+        except Exception as e:
+            st.warning(f"Could not load interfaces.csv from {csv_path}: {e}")
+    if not frames:
         return None
-    except Exception as e:
-        st.warning(f"Could not load interfaces.csv from {job_path}: {e}")
-        return None
+    return pd.concat(frames, ignore_index=True)
 
 
 def get_pae_plot_image(job_path: Path, model_name: str, rank: int) -> Optional[Path]:
