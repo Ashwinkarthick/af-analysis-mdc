@@ -12,6 +12,8 @@ import os
 import re
 import time
 import zipfile
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -26,6 +28,7 @@ try:
         get_pae_file_for_model,
         get_pae_plot_image,
         load_interfaces_csv,
+        patch_pae_json_for_alphajudge,
         plot_model_comparison,
         plot_pae_heatmap,
     )
@@ -36,6 +39,7 @@ except ModuleNotFoundError:  # allows `streamlit run src/aplit/app.py`
         get_pae_file_for_model,
         get_pae_plot_image,
         load_interfaces_csv,
+        patch_pae_json_for_alphajudge,
         plot_model_comparison,
         plot_pae_heatmap,
     )
@@ -167,6 +171,20 @@ def render_sidebar(default_directory: str):
     )
 
     st.sidebar.divider()
+    st.sidebar.subheader("AlphaJudge")
+    patch_pae_for_alphajudge = st.sidebar.checkbox(
+        "Patch compact PAE JSONs",
+        value=True,
+        help="Adds missing ptm/iptm score keys to PAE-only AF2 JSONs before running AlphaJudge.",
+    )
+    run_alphajudge_clicked = st.sidebar.button(
+        "Run AlphaJudge for selected directory",
+        use_container_width=True,
+        help="Runs alphajudge on each detected job folder. Existing interfaces.csv files are kept unless force is enabled.",
+    )
+    force_alphajudge = st.sidebar.checkbox("Force AlphaJudge re-run", value=False)
+
+    st.sidebar.divider()
     st.sidebar.subheader("Auto-refresh")
     auto_refresh = st.sidebar.checkbox("Enable", value=False)
     refresh_interval = st.sidebar.slider(
@@ -176,7 +194,7 @@ def render_sidebar(default_directory: str):
         st.cache_data.clear()
         st.rerun()
 
-    return directory, auto_refresh, refresh_interval, compute_mean_pae
+    return directory, auto_refresh, refresh_interval, compute_mean_pae, patch_pae_for_alphajudge, run_alphajudge_clicked, force_alphajudge
 
 
 def get_alphajudge_numeric_cols(results_df: pd.DataFrame) -> List[str]:
@@ -601,14 +619,68 @@ def render_missing_directory_help() -> None:
     )
 
 
+
+def run_alphajudge_for_directory(directory: str, patch_pae: bool = True, force: bool = False) -> None:
+    alphajudge_bin = shutil.which("alphajudge")
+    if not alphajudge_bin:
+        st.error("alphajudge was not found in PATH for the Streamlit process.")
+        return
+    root = Path(directory)
+    analyzer = AlphaPulldownAnalyzer(str(root))
+    jobs = [p for p in sorted(root.iterdir()) if p.is_dir()]
+    progress = st.progress(0)
+    log_box = st.empty()
+    ran = skipped = failed = 0
+    for idx, job_dir in enumerate(jobs, start=1):
+        job_info = analyzer._get_job_models(job_dir)
+        if not job_info or not job_info.get("models"):
+            continue
+        interfaces_path = job_dir / "interfaces.csv"
+        if interfaces_path.exists() and interfaces_path.stat().st_size > 0 and not force:
+            skipped += 1
+            continue
+        if patch_pae:
+            for model in job_info.get("models", []):
+                patch_pae_json_for_alphajudge(job_dir, str(model.get("model_name", "")))
+        cmd = [
+            alphajudge_bin, str(job_dir),
+            "--models_to_analyse", os.environ.get("ALPHAJUDGE_MODELS_TO_ANALYSE", "best"),
+            "--contact_thresh", os.environ.get("ALPHAJUDGE_CONTACT_THRESH", "8.0"),
+            "--pae_filter", os.environ.get("ALPHAJUDGE_PAE_FILTER", "100.0"),
+            "--ipsae_pae_cutoff", os.environ.get("ALPHAJUDGE_IPSAE_PAE_CUTOFF", "10.0"),
+            "--cores", os.environ.get("ALPHAJUDGE_CORES", "1"),
+        ]
+        log_path = job_dir / "alphajudge.log"
+        log_box.info(f"Running AlphaJudge: {job_dir.name}")
+        try:
+            with log_path.open("w") as handle:
+                proc = subprocess.run(cmd, stdout=handle, stderr=subprocess.STDOUT, check=False)
+        except Exception as exc:
+            failed += 1
+            st.warning(f"Could not run AlphaJudge for {job_dir.name}: {exc}")
+            continue
+        if proc.returncode != 0:
+            failed += 1
+            st.warning(f"AlphaJudge failed for {job_dir.name}; see {log_path}")
+        else:
+            ran += 1
+        progress.progress(idx / max(len(jobs), 1))
+    progress.empty()
+    log_box.success(f"AlphaJudge complete: {ran} run, {skipped} skipped, {failed} failed.")
+    st.cache_data.clear()
+
+
 def main() -> None:
     initialize_session_state()
     render_header()
 
-    directory, auto_refresh, refresh_interval, compute_mean_pae = render_sidebar(get_default_directory())
+    directory, auto_refresh, refresh_interval, compute_mean_pae, patch_pae_for_alphajudge, run_alphajudge_clicked, force_alphajudge = render_sidebar(get_default_directory())
     if not directory or not Path(directory).exists():
         render_missing_directory_help()
         return
+
+    if run_alphajudge_clicked:
+        run_alphajudge_for_directory(directory, patch_pae_for_alphajudge, force_alphajudge)
 
     @st.cache_data(ttl=refresh_interval if auto_refresh else None, show_spinner=False)
     def load_predictions(directory_path: str, compute_mean_pae_flag: bool) -> pd.DataFrame:
