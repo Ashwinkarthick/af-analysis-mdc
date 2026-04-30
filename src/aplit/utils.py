@@ -22,8 +22,9 @@ import matplotlib.pyplot as plt
 class AlphaPulldownAnalyzer:
     """Handles analysis of AlphaPulldown prediction directories"""
 
-    def __init__(self, output_dir: str):
+    def __init__(self, output_dir: str, compute_mean_pae: bool = False):
         self.output_dir = Path(output_dir)
+        self.compute_mean_pae = compute_mean_pae
         self._job_cache: Dict[Path, Optional[Dict[str, Any]]] = {}
 
     @staticmethod
@@ -362,7 +363,7 @@ class AlphaPulldownAnalyzer:
                 iptm_score = best_model_info.get("iptm", 0.0) or 0.0
 
                 mean_pae = None
-                if job_type == "af2":
+                if self.compute_mean_pae and job_type == "af2":
                     pae_mtx, _ = self.obtain_pae_and_iptm(job_dir, best_model)
                     if pae_mtx is not None:
                         seq_lengths = self.obtain_seq_lengths(job_dir)
@@ -466,29 +467,79 @@ class AlphaPulldownAnalyzer:
             return float("nan")
 
 
-def plot_pae_heatmap(pae_file: Path, figsize: Tuple[int, int] = (10, 10)) -> plt.Figure:
-    """Create PAE heatmap plot"""
-    try:
-        with open(pae_file, "r") as f:
-            pae_data = json.load(f)
 
-        pae_mtx = np.array(pae_data[0]["predicted_aligned_error"])
+@st.cache_data(show_spinner=False)
+def load_pae_matrix_cached(pae_file: str) -> np.ndarray:
+    """Load a PAE matrix once and reuse it across Streamlit reruns."""
+    with open(pae_file, "r") as f:
+        pae_data = json.load(f)
+
+    if isinstance(pae_data, list):
+        data = pae_data[0]
+    else:
+        data = pae_data
+
+    matrix = data.get("predicted_aligned_error") or data.get("pae")
+    if matrix is None:
+        raise ValueError(f"No PAE matrix found in {pae_file}")
+    return np.array(matrix, dtype=np.float32)
+
+
+def _stride_downsample(matrix: np.ndarray, max_points: int = 900) -> Tuple[np.ndarray, int]:
+    """Fast visual downsampling for large matrices shown in Streamlit."""
+    n_rows, n_cols = matrix.shape[:2]
+    stride = max(1, int(math.ceil(max(n_rows, n_cols) / max_points)))
+    if stride == 1:
+        return matrix, stride
+    return matrix[::stride, ::stride], stride
+
+
+def plot_pae_heatmap(pae_file: Path, figsize: Tuple[int, int] = (10, 10)) -> Optional[plt.Figure]:
+    """Create a fast PAE heatmap plot for the web UI.
+
+    Large PAE matrices are loaded through Streamlit's cache and visually
+    downsampled by stride for display. The original JSON remains available via
+    the download button, but reruns and model switching are much faster.
+    """
+    try:
+        pae_mtx = load_pae_matrix_cached(str(pae_file))
+        display_mtx, stride = _stride_downsample(pae_mtx, max_points=900)
 
         fig, ax = plt.subplots(figsize=figsize)
-        im = ax.imshow(pae_mtx, cmap="Greens_r", vmin=0, vmax=30)
+        im = ax.imshow(
+            display_mtx,
+            cmap="Greens_r",
+            vmin=0,
+            vmax=30,
+            origin="lower",
+            interpolation="nearest",
+            rasterized=True,
+        )
+
+        total_residues = pae_mtx.shape[0]
+        tick_count = 6
+        residue_ticks = np.linspace(1, total_residues, min(tick_count, total_residues), dtype=int)
+        plot_ticks = (residue_ticks - 1) / stride
+        ax.set_xticks(plot_ticks)
+        ax.set_xticklabels(residue_ticks)
+        ax.set_yticks(plot_ticks)
+        ax.set_yticklabels(residue_ticks)
+        ax.tick_params(axis="both", which="major", length=5, width=1)
+
         ax.set_xlabel("Scored residue", fontsize=12)
         ax.set_ylabel("Aligned residue", fontsize=12)
-        ax.set_title("Predicted Aligned Error (PAE)", fontsize=14, fontweight="bold")
+        title = "Predicted Aligned Error (PAE)"
+        if stride > 1:
+            title += f" — displayed every {stride} residues"
+        ax.set_title(title, fontsize=14, fontweight="bold")
 
-        cbar = plt.colorbar(im, ax=ax)
+        cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
         cbar.set_label("Expected position error (Å)", rotation=270, labelpad=20)
-
+        fig.tight_layout()
         return fig
     except Exception as e:
         st.error(f"Could not create PAE plot: {e}")
         return None
-
-
 def plot_model_comparison(models: List[Dict]) -> Optional[plt.Figure]:
     """Create bar plot comparing all models"""
     if not models:
