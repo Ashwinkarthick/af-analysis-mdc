@@ -43,9 +43,7 @@ bash run_af_analysis.sh -- --directory /path/to/predictions
 
 ## Attribution and contact
 
-AF-Analysis is an MDC-maintained analysis viewer modified and maintained by **Ashwin Karthick Natarajan**.
-
-Queries: ashwin.natarajan@mdc-berlin.de
+AF-Analysis is an MDC-maintained analysis viewer modified.
 
 Built from and extended around these open-source projects:
 
