@@ -1,5 +1,5 @@
 """
-Command-line interface for APLit
+Command-line interface for AF-Analysis
 """
 
 import sys
@@ -11,18 +11,17 @@ from pathlib import Path
 
 
 def main():
-    """Launch the AP streamlit application"""
+    """Launch the AF-Analysis Streamlit application"""
     parser = argparse.ArgumentParser(
-        description="APLit - AlphaPulldown Structure Viewer",
+        description="AF-Analysis - AlphaFold / AlphaPulldown Interaction Viewer",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  aplit
-  aplit --directory /path/to/predictions
-  aplit --directory /path/to/predictions --port 8502
+  af-analysis
+  af-analysis --directory /path/to/predictions
+  af-analysis --directory /path/to/predictions --port 8502
 
-For more information, visit: https://github.com/KosinskiLab/aplit
-        """,
+""",
     )
 
     parser.add_argument(
@@ -84,6 +83,8 @@ For more information, visit: https://github.com/KosinskiLab/aplit
         str(args.port),
         "--server.address",
         args.server_address,
+        "--client.showSidebarNavigation",
+        "false",
     ]
 
     # Handle browser settings
@@ -103,12 +104,13 @@ For more information, visit: https://github.com/KosinskiLab/aplit
 
     # Prepare environment
     env = os.environ.copy()
+    env.setdefault("STREAMLIT_CLIENT_SHOW_SIDEBAR_NAVIGATION", "false")
     if args.directory:
-        env["APLIT_DEFAULT_DIRECTORY"] = str(Path(args.directory).resolve())
+        env["AF_ANALYSIS_DEFAULT_DIRECTORY"] = str(Path(args.directory).resolve())
 
     # Print startup message
     print("=" * 70)
-    print("APLit - AlphaPulldown Structure Viewer")
+    print("AF-Analysis - AlphaFold / AlphaPulldown Interaction Viewer")
     print("=" * 70)
     if args.directory:
         print(f"Directory: {args.directory}")
@@ -124,7 +126,7 @@ For more information, visit: https://github.com/KosinskiLab/aplit
         print("\n\nServer stopped.")
         sys.exit(0)
     except Exception as e:
-        print(f"\nError running APLit: {e}", file=sys.stderr)
+        print(f"\nError running AF-Analysis: {e}", file=sys.stderr)
         sys.exit(1)
 
 

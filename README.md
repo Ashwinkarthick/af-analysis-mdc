@@ -1,78 +1,55 @@
-# APLit
+# AF-Analysis
 
-APLit is a Streamlit UI for browsing AlphaPulldown runs, visualising AF2 **and AF3** outputs, and (optionally) overlaying AlphaJudge interface scores. The original code was from the Kosinski Lab at EMBL. 
+Streamlit UI for browsing AlphaFold, AlphaFold-Multimer, AlphaFold3, and AlphaPulldown prediction folders.
 
-## Highlights
+AF-Analysis loads the local dataframe cache when available, merges the interface-analysis CSV (`predictions_with_pae_cutoff_*.csv`) when present, and can run the bundled interaction-report module plus AlphaJudge backfill when the CSV is missing.
 
-- 🎨 Clean, responsive grid with instant search, sort, and ipTM / PAE sliders
-- 📊 Built-in viewers for PAE heatmaps and predicted models
-- 🔌 Optional AlphaJudge integration – drop `interfaces.csv` next to each job to unlock extra metrics
-- 🧮 AlphaJudge filters are cumulative so you can combine multiple sliders at once
-- 🔄 Auto-refresh to follow running AlphaPulldown scans
-- 📥 Export any table view as CSV for downstream analysis
+## Install
 
-## Installation
-
-Requirements: Python 3.8+
+Recommended install from the unpacked folder:
 
 ```bash
-pip install git+ssh://git@github.com/AshwinKarthick/aplit.git
+bash install_af_analysis.sh
 ```
 
-## Running the app
+This installs AF-Analysis and its Python dependencies, including AlphaJudge from the KosinskiLab GitHub repository. It also checks whether the `alphajudge` command is available after installation.
+
+Manual equivalent:
 
 ```bash
-# Local defaults: binds to localhost:8501 and opens a browser
-aplit
-
-# Provide a default predictions folder and custom port
-aplit --directory /path/to/predictions --port 8502
+pip install -e .
 ```
 
-Inside the UI open **Configuration ▸ Predictions Directory** and point it to the parent folder that contains your AlphaPulldown jobs (AF2 or AF3):
+The dependency list is also available in `requirements.txt`.
 
-```
-/path/to/predictions/
-├── protein1_and_protein2/          # AF2 job (ranking_debug.json, pae_*.json, ranked_*.pdb/cif)
-│   └── ...
-├── protein3_and_protein4/          # AF3 job (ranking_scores.csv, *_summary_confidences.json, etc.)
-│   └── ...
-├── protein1_and_protein3/
-│   └── ...
+## Run
+
+```bash
+af-analysis --directory /path/to/predictions --port 8502
 ```
 
-### AlphaJudge scores (optional)
+Or from the unpacked folder:
 
-- When an AlphaPulldown job directory includes AlphaJudge’s `interfaces.csv`, APLit automatically loads all numeric columns (e.g., `global_dockq`, `best_interface_ipsae`, `best_interface_lis`) and exposes them in the table, sort menu, and filter sliders.
-- If **no** AlphaJudge file is present (or it is empty), the UI silently skips those columns—ipTM, pTM, and PAE views continue to work exactly as before, so you can safely mix jobs with and without AlphaJudge annotations.
-- The AlphaJudge expander only appears when at least one numeric score is available.
+```bash
+bash run_af_analysis.sh -- --directory /path/to/predictions
+```
 
-### Filtering & sorting
+## Notes
 
-- The ipTM and mean-PAE sliders are always active; search matches job names case-insensitively.
-- AlphaJudge sliders apply **all at once** (logical AND). Shrinking multiple ranges narrows the table to entries that satisfy every slider you touched.
-- You can sort by ipTM, ipTM+pTM, job name, or any AlphaJudge metric currently loaded.
-- Click a job name in the table to jump directly to the detailed viewer for that run.
+- Overview plots are generated only when requested.
+- Clicking a Plotly point opens that prediction in the structure viewer.
+- The reporting entry point is now the bundled `af_analysis.interaction_report` module.
+- Existing dataframe caches are read from the previous location as a backwards-compatible fallback; new caches are written to `.af_analysis_cache`.
 
-### Running on HPC via SSH
+## Attribution and contact
 
-1. Launch APLit on the cluster/login node (headless, bound to localhost):
+AF-Analysis is an MDC-maintained analysis viewer modified and maintained by **Ashwin Karthick Natarajan**.
 
-   ```bash
-   aplit --directory /cluster/path/to/predictions --server-address localhost --no-browser
-   ```
+Queries: ashwin.natarajan@mdc-berlin.de
 
-2. Create an SSH tunnel from your laptop to the cluster (example for EMBL login node):
+Built from and extended around these open-source projects:
 
-   ```bash
-   ssh -N -L 8501:localhost:8501 login1.cluster.embl.de
-   ```
+- APLit: https://github.com/KosinskiLab/aplit
+- AlphaJudge: https://github.com/KosinskiLab/AlphaJudge
+- af_analysis: https://github.com/samuelmurail/af_analysis
 
-3. Visit `http://localhost:8501` in your local browser. The tunnel forwards traffic securely to the remote Streamlit session.
-
-> Tip: keep the tunnel window open; closing it stops the port forward. Use a different local port (`-L 8502:localhost:8501`) if 8501 is already taken.
-
-## Links
-
-- [AlphaPulldown](https://github.com/KosinskiLab/AlphaPulldown)
-- [AlphaJudge](https://github.com/KosinskiLab/AlphaJudge)

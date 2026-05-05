@@ -1,0 +1,6 @@
+streamlit>=1.51.0
+pandas>=2.2.2
+matplotlib>=3.10.5
+numpy>=1.26.4
+plotly>=5.22.0
+alphajudge @ git+https://github.com/KosinskiLab/AlphaJudge.git@main
