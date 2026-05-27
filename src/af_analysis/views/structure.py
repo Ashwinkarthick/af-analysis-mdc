@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
+import re
 
 import pandas as pd
 import streamlit as st
@@ -13,12 +14,68 @@ from af_analysis.plots.pae import plot_pae_heatmap_interactive
 from af_analysis.utils import (
     AlphaPulldownAnalyzer,
     create_3dmol_view,
-    get_pae_file_for_model,
     get_pae_plot_image,
     load_interfaces_csv,
     plot_model_comparison,
     plot_pae_heatmap,
 )
+
+
+def get_pae_file_for_model(job_path: Path, model_name: str, rank: Optional[int] = None) -> Optional[Path]:
+    """Find AF2 or AF3 PAE/confidence JSON for a specific model.
+
+    AF2/ColabFold usually writes ``pae_<model>.json``. AF3 stores PAE inside
+    ``confidences.json`` or ``ranked_*_confidences.json`` files, so include
+    those files before falling back to static PAE images.
+    """
+    job_path = Path(job_path)
+    model_dir = job_path / model_name
+    candidates = []
+
+    if model_dir.is_dir():
+        candidates.extend(
+            [
+                model_dir / "confidences.json",
+                model_dir / "summary_confidences.json",
+            ]
+        )
+
+    if rank is not None:
+        candidates.extend(
+            [
+                job_path / f"ranked_{rank}_confidences.json",
+                job_path / f"ranked_{rank}_summary_confidences.json",
+                job_path / f"pae_ranked_{rank}.json",
+            ]
+        )
+
+    candidates.append(job_path / f"pae_{model_name}.json")
+    match = re.search(r"model_(\d+)", model_name)
+    if match:
+        model_num = match.group(1)
+        candidates.extend(
+            [
+                job_path / f"pae_model_{model_num}_ptm_pred_0.json",
+                job_path / f"pae_model_{model_num}.json",
+            ]
+        )
+
+    candidates.extend(
+        [
+            job_path / "confidences.json",
+            job_path / "summary_confidences.json",
+        ]
+    )
+    candidates.extend(sorted(job_path.glob("ranked_*_confidences.json")))
+    candidates.extend(sorted(job_path.glob("*_confidences.json")))
+
+    for candidate in dict.fromkeys(candidates):
+        try:
+            if candidate.exists() and candidate.stat().st_size > 0:
+                return candidate
+        except Exception:
+            continue
+    return None
 
 
 def metric_text(value, fmt: str = ".3f") -> str:
