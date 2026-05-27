@@ -76,7 +76,7 @@ def render_viewer_page(results_df: pd.DataFrame) -> None:
     structure_file = selected_model.get("structure_file") or selected_model.get("pdb_file")
     structure_format = selected_model.get("structure_format", "pdb")
 
-    pae_file = get_pae_file_for_model(job_path, selected_model["model_name"])
+    pae_file = get_pae_file_for_model(job_path, selected_model["model_name"], selected_model["rank"])
     pae_image = get_pae_plot_image(job_path, selected_model["model_name"], selected_model["rank"])
     interfaces_df = load_interfaces_csv(job_path)
     model_interfaces = (
